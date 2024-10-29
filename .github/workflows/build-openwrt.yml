@@ -1,0 +1,250 @@
+name: Build OpenWrt
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH连接Actions'
+        required: false
+        default: 'false'
+      commit_id:
+        description: '使用指定Commit ID'
+        required: false
+        default: ''
+      cache_toolchain:
+        description: '启用Cache缓存Toolchain'
+        required: false
+        default: 'true'
+      upload_action:
+        description: '上传固件到Action'
+        required: false
+        default: 'false'
+      upload_release:
+        description: '上传固件到Release'
+        required: false
+        default: 'true'
+      upload_packages:
+        description: '上传Packages到Action'
+        required: false
+        default: 'false'
+      repo_url:
+        description: '使用的OpenWrt源码地址'
+        required: false
+        default: 'https://github.com/coolsnowwolf/lede'
+        
+env:
+  REPO_URL: ${{ inputs.repo_url || 'https://github.com/coolsnowwolf/lede' }}
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_FEED_SH: diy-feed.sh
+  DIY_PACKAGE_SH: diy-package.sh
+  TZ: Asia/Shanghai
+  COMMIT_ID: ${{ inputs.commit_id || '' }}
+  FILE_NAME: 3865U
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+    - name: "Optimize Disk Space"
+      uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
+      with:
+        operate_sudo: "True"
+        general_include: ".+"
+        general_exclude: |-
+          ^GCC$
+          ^G\+\+$
+          Clang
+          LLVM
+        docker_include: ".+"
+        docker_prune: "True"
+        docker_clean: "True"
+        apt_prune: "True"
+        apt_clean: "True"
+        homebrew_prune: "True"
+        homebrew_clean: "True"
+        npm_prune: "True"
+        npm_clean: "True"
+        os_swap: "True"
+
+    - name: "Initialization Environment"
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo apt autoremove
+        sudo apt autoclean
+        sudo apt-get clean
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+        libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+        vim wget xmlto xxd zlib1g-dev python3-setuptools
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
+        /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules
+        sudo timedatectl set-timezone "$TZ"
+        sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
+ 
+    - name: "Checkout"
+      uses: actions/checkout@main
+      with:
+        ref: 3865U
+      
+    - name: "Clone Source Code"
+      working-directory: ./
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        if [ -n "$COMMIT_ID" ]; then
+          cd openwrt
+          git checkout $COMMIT_ID
+        fi
+        
+    - name: "Get Cache Infos"
+      run: |
+        SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
+        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
+        DEVICE_TARGET=$([ -e $CONFIG_FILE ] && cat $CONFIG_FILE | grep CONFIG_TARGET_BOARD | awk -F '"' '{print $2}' || echo "x86")
+        echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
+        DEVICE_SUBTARGET=$([ -e $CONFIG_FILE ] && cat $CONFIG_FILE | grep CONFIG_TARGET_SUBTARGET | awk -F '"' '{print $2}' || echo "64")
+        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
+        
+    - name: "Cache Toolchain"
+      if: github.event.inputs.cache_toolchain == 'true'
+      uses: HiGarfield/cachewrtbuild@main
+      with:
+        ccache: false
+        mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
+        prefix: 'openwrt'
+
+    - name: "Load Custom Feed"
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_FEED_SH
+        chmod +x $DIY_PACKAGE_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_FEED_SH
+        ./scripts/feeds update -a
+        $GITHUB_WORKSPACE/$DIY_PACKAGE_SH
+        ./scripts/feeds install -a
+
+    - name: "SSH Connection to Actions"
+      if: github.event.inputs.ssh == 'true'
+      run: |
+        rm -f openwrt/.config*
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x tools/tmate.sh
+        chmod +x tools/runSSH.sh
+        # Install tmate on macOS or Ubuntu
+        echo -e "${INFO} Setting up tmate ..."
+        if [[ -n "$(uname | grep Linux)" ]]; then
+            bash tools/tmate.sh
+        elif [[ -x "$(command -v brew)" ]]; then
+            brew install tmate
+        else
+            echo -e "${ERROR} This system is not supported!"
+            exit 1
+        fi
+        bash tools/runSSH.sh
+      
+    - name: Commit and Push .config File
+      if: github.event.inputs.ssh == 'true'
+      run: |
+        [ -e openwrt/.config ] && mv openwrt/.config $CONFIG_FILE
+        git config --global user.email 'action@github.com'
+        git config --global user.name ${{ github.actor }}
+        git add $CONFIG_FILE
+        # 检查是否有文件被修改
+        if git diff --staged --quiet; then
+          echo -e ".config文件未被修改。"
+          exit 0
+        else
+          git commit -m "Update .config"
+          git push
+          echo -e "上传.config文件成功。"
+        fi
+        echo -e "配置文件修改完成，退出Actions，更改SSH为false后重新编译"
+        
+    - name: "Download Package"
+      id: package
+      if: github.event.inputs.ssh != 'true'
+      run: |
+        cd openwrt
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: "Compile the Firmware"
+      id: compile
+      if: github.event.inputs.ssh != 'true'
+      run: |
+        rm -f openwrt/.config*
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: "Organize Files"
+      id: organize
+      if: github.event.inputs.ssh != 'true'
+      run: |
+        mkdir -p openwrt/packages
+        mkdir -p openwrt/firmware
+        mv openwrt/bin/targets/*/*/packages/* openwrt/packages/
+        rm -rf openwrt/bin/targets/*/*/packages
+        mv openwrt/bin/targets/*/*/* openwrt/firmware/
+        useVersionInfo=$(git show -s --date=short --format="提交人: %an<br/>提交时间: %cd<br/>提交内容: %s<br/>commit hash: %H")
+        echo "useVersionInfo=$useVersionInfo" >> $GITHUB_ENV
+        echo "DATE=$(date "+%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: "Upload Packages to Action"
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && github.event.inputs.upload_packages == 'true' && !cancelled()
+      with:
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/packages/
+
+    - name: "Upload Firmware to Action"
+      uses: actions/upload-artifact@v4.3.6
+      if: steps.compile.outputs.status == 'success' && github.event.inputs.upload_action == 'true' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/firmware/
+
+    - name: "Upload Firmware to Releases"
+      id: release
+      uses: ncipollo/release-action@main
+      if: steps.compile.outputs.status == 'success' && github.event.inputs.upload_release == 'true' && !cancelled()
+      with:
+        name: ${{ env.DATE }} OpenWrt for ${{ env.FILE_NAME }}
+        allowUpdates: true
+        removeArtifacts: true
+        tag: ${{ env.DATE }}_${{ env.FILE_NAME }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+        artifacts: openwrt/firmware/*
+        body: |
+          #### 源码最近提交信息:
+          - ${{ env.useVersionInfo }}
+          
+    - name: "Remove Old Releases"
+      uses: dev-drprasad/delete-older-releases@v0.3.4
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
