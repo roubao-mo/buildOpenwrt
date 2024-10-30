@@ -42,7 +42,7 @@ env:
   DIY_PACKAGE_SH: diy-package.sh
   TZ: Asia/Shanghai
   COMMIT_ID: ${{ inputs.commit_id || '' }}
-  FILE_NAME: 3865U
+  FILE_NAME: main
 
 jobs:
   build:
